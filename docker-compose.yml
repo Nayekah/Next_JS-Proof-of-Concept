@@ -1,0 +1,36 @@
+services:
+  cve-2025-29927-vuln:
+    build:
+      context: ./pocs/cve-2025-29927
+      args:
+        NEXT_VERSION: 15.2.2
+        REACT_VERSION: 19.0.0
+    ports:
+      - "3001:3000"
+
+  cve-2025-29927-fixed:
+    build:
+      context: ./pocs/cve-2025-29927
+      args:
+        NEXT_VERSION: 15.2.3
+        REACT_VERSION: 19.0.0
+    ports:
+      - "3002:3000"
+
+  cve-2026-27978-vuln:
+    build:
+      context: ./pocs/cve-2026-27978
+      args:
+        NEXT_VERSION: 16.1.6
+        REACT_VERSION: 19.0.0
+    ports:
+      - "3003:3000"
+
+  cve-2026-27978-fixed:
+    build:
+      context: ./pocs/cve-2026-27978
+      args:
+        NEXT_VERSION: 16.1.7
+        REACT_VERSION: 19.0.0
+    ports:
+      - "3004:3000"
