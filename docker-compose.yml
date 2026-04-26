@@ -34,3 +34,21 @@ services:
         REACT_VERSION: 19.0.0
     ports:
       - "3004:3000"
+
+  cve-2026-29057-vuln:
+    build:
+      context: ./pocs/cve-2026-29057
+      args:
+        NEXT_VERSION: 15.5.12
+        REACT_VERSION: 19.0.0
+    ports:
+      - "3005:3000"
+
+  cve-2026-29057-fixed:
+    build:
+      context: ./pocs/cve-2026-29057
+      args:
+        NEXT_VERSION: 15.5.13
+        REACT_VERSION: 19.0.0
+    ports:
+      - "3006:3000"
